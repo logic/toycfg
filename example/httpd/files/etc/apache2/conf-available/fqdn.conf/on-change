@@ -1,2 +1,3 @@
 #!/bin/sh
 exec a2enconf fqdn
+service apache2 reload

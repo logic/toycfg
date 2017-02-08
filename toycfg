@@ -124,6 +124,7 @@ function process_packages() {
 
 function process_files() {
     local module="${1}"
+    local changed
     local filetype
     local content
     local target
@@ -138,6 +139,7 @@ function process_files() {
         find "${files}" -mindepth 1 -type d -printf '%P\n' | (
             while read -r resource
             do
+                changed=0
                 if [[ -f ${files}/${resource}/type ]]
                 then
                     filetype=$(cat "${files}/${resource}/type")
@@ -159,6 +161,7 @@ function process_files() {
                         then
                             log "Updating content of /${resource}"
                             cp "${files}/${resource}/content" "/${resource}"
+                            changed=1
                         fi
                         ;;
                     template)
@@ -169,22 +172,39 @@ function process_files() {
                         then
                             log "Updating content of /${resource}"
                             echo "${content}" > "/${resource}"
+                            changed=1
                         fi
                         ;;
                     directory)
                         log "Creating directory /${resource}"
-                        mkdir "/${resource}"
+                        if [[ ! -d "/${resource}" ]]
+                        then
+                            if [[ -e "/${resource}" ]]
+                            then
+                                error "/${resource} already exists as non-directory"
+                                continue
+                            else
+                                log "Creating directory at /${resource}"
+                                mkdir "/${resource}"
+                                changed=1
+                            fi
+                        fi
                         ;;
                     link)
                         target=$(cat "${files}/${resource}/content")
-                        log "Creating symlink /${resource} -> ${target}"
-                        ln -s "${target}" "/${resource}"
+                        if [[ ! -e "/${resource}" ]]
+                        then
+                            log "Creating symlink /${resource} -> ${target}"
+                            ln -s "${target}" "/${resource}"
+                            changed=1
+                        fi
                         ;;
                     absent)
                         if [[ -e "/${resource}" ]]
                         then
                             log "Removing /${resource}"
                             rm -r "/${resource:?}"
+                            changed=1
                         fi
                         ;;
                     *)
@@ -209,6 +229,12 @@ function process_files() {
                     then
                         mode=$(cat "${files}/${resource}/mode")
                         chmod "${mode}" "/${resource}"
+                    fi
+
+                    if [[ -x ${files}/${resource}/on-change && $changed -ne 0 ]]
+                    then
+                        runner "${files}/${resource}/on-change" || \
+                          error "${resource} on-change execution failed"
                     fi
 
                     if [[ -x ${files}/${resource}/post ]]

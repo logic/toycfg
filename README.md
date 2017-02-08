@@ -115,7 +115,10 @@ script before any changes are applied. A non-zero exit code will cause the
 resource to be skipped.
 
 If the directory contains an executable file named `post`, it is executed after
-all changes have been applied.
+all changes have been applied, and only if changes have actually been made.
+
+If the directory contains an executable file named `post`, it is executed after
+all changes have been applied, and runs every time.
 
 ### Services
 
