@@ -11,7 +11,7 @@ use this for anything, it's mostly just here so I can point at it and say
 "see! this is terrible! stop writing terrible shell scripts to manage your
 infrastructure!"
 
-`toycfg` has packages, files, and services, and modules (meta-collections of
+`toycfg` has packages, files, services, and modules (meta-collections of
 packages, files, and services) as first-class resources, and aside from
 services, each resource has an associated pre- and post-hook that can be
 executed prior to and after work on the resource has been completed.
