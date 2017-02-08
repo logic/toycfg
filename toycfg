@@ -1,0 +1,356 @@
+#!/bin/bash
+
+# toycfg - A simple configuration management system
+# Copyright (C) 2017 Ed Marshall <esm@logic.net>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+function log() {
+    echo -e "\e[2m[$(date)]\e[0m" "$@" 1>&2
+}
+
+function ok() {
+    log "\e[32m$*\e[0m"
+}
+
+function error() {
+    log "\e[31;1mERROR:\e[0m" "$@"
+}
+
+function warning() {
+    log "\e[33mWARN:\e[0m" "$@"
+}
+
+function runner() {
+    local exitcode
+
+    log "running ${*}"
+    if ! "$@" 2>&1
+    then
+        exitcode="$?"
+        warning "finished ${1} with exit code ${exitcode}"
+        return "${exitcode}"
+    fi
+    ok "finished ${*}"
+}
+
+function process_exec() {
+    local module="${1}"
+    local execfile="${moddir}/${module}/${2}"
+    if [[ -x $execfile ]]
+    then
+        runner "${execfile}"
+        return $?
+    fi
+    return 0
+}
+
+function process_submodules() {
+    local module="${1}"
+    local modfile="${moddir}/${module}/${2}"
+    if [[ -f $modfile ]]
+    then
+        (
+            while read -r submodule
+            do
+                if ! process_module "${submodule}"
+                then
+                    return $?
+                fi
+            done
+        ) < "${modfile}"
+    fi
+    return 0
+}
+
+function process_packages() {
+    local module="${1}"
+    local packages="${moddir}/${module}/packages"
+    local version
+
+    if [[ -d $packages ]]
+    then
+        log "Processing packages for ${module}"
+        find "${packages}" -mindepth 1 -maxdepth 1 -type d -printf '%P\n' | (
+            while read -r resource
+            do
+                if [[ -f "${packages}/${resource}/version" ]]
+                then
+                    if [[ -x ${packages}/${resource}/pre ]]
+                    then
+                        if ! runner "${packages}/${resource}/pre"
+                        then
+                            error "${resource} pre execution failed, skipping resource"
+                            continue
+                        fi
+                    fi
+
+                    version="$(cat "${packages}/${resource}/version")"
+                    log "Package ${resource} wants to be ${version}"
+                    case "${version}" in
+                    absent)
+                        apt-get -y remove "${resource}"
+                        ;;
+                    latest)
+                        apt-get -y install "${resource}"
+                        ;;
+                    *)
+                        apt-get -y install "${resource}=${version}"
+                        ;;
+                    esac
+
+                    if [[ -x ${packages}/${resource}/post ]]
+                    then
+                        runner "${packages}/${resource}/post" || \
+                          error "${resource} post execution failed"
+                    fi
+                fi
+            done
+        )
+    fi
+    return 0
+}
+
+function process_files() {
+    local module="${1}"
+    local filetype
+    local content
+    local target
+    local owner
+    local group
+    local mode
+
+    local files="${moddir}/${module}/files"
+    if [[ -d $files ]]
+    then
+        log "Processing files for ${module}"
+        find "${files}" -mindepth 1 -type d -printf '%P\n' | (
+            while read -r resource
+            do
+                if [[ -f ${files}/${resource}/type ]]
+                then
+                    filetype=$(cat "${files}/${resource}/type")
+
+                    if [[ -x ${files}/${resource}/pre ]]
+                    then
+                        if ! runner "${files}/${resource}/pre"
+                        then
+                            error "${resource} pre execution failed, skipping resource"
+                            continue
+                        fi
+                    fi
+
+                    case "${filetype}" in
+                    file)
+                        oldsum="$(sha256sum "/${resource}" 2> /dev/null | cut -f1 -d' ')"
+                        newsum="$(sha256sum "${files}/${resource}/content" 2> /dev/null | cut -f1 -d' ')"
+                        if [[ $oldsum != "$newsum" ]]
+                        then
+                            log "Updating content of /${resource}"
+                            cp "${files}/${resource}/content" "/${resource}"
+                        fi
+                        ;;
+                    template)
+                        content="$(eval echo "$(cat "${files}/${resource}/content")")"
+                        oldsum="$(sha256sum "/${resource}" 2> /dev/null | cut -f1 -d' ')"
+                        newsum="$(echo "${content}" | sha256sum 2> /dev/null | cut -f1 -d' ')"
+                        if [[ $oldsum != "$newsum" ]]
+                        then
+                            log "Updating content of /${resource}"
+                            echo "${content}" > "/${resource}"
+                        fi
+                        ;;
+                    directory)
+                        log "Creating directory /${resource}"
+                        mkdir "/${resource}"
+                        ;;
+                    link)
+                        target=$(cat "${files}/${resource}/content")
+                        log "Creating symlink /${resource} -> ${target}"
+                        ln -s "${target}" "/${resource}"
+                        ;;
+                    absent)
+                        if [[ -e "/${resource}" ]]
+                        then
+                            log "Removing /${resource}"
+                            rm -r "/${resource:?}"
+                        fi
+                        ;;
+                    *)
+                        error "'${resource}' has invalid file type '${filetype}'"
+                        continue
+                        ;;
+                    esac
+
+                    if [[ -f ${files}/${resource}/owner ]]
+                    then
+                        owner=$(cat "${files}/${resource}/owner")
+                        chown "${owner}" "/${resource}"
+                    fi
+
+                    if [[ -f ${files}/${resource}/group ]]
+                    then
+                        group=$(cat "${files}/${resource}/group")
+                        chgrp "${group}" "/${resource}"
+                    fi
+
+                    if [[ -f ${files}/${resource}/mode ]]
+                    then
+                        mode=$(cat "${files}/${resource}/mode")
+                        chmod "${mode}" "/${resource}"
+                    fi
+
+                    if [[ -x ${files}/${resource}/post ]]
+                    then
+                        runner "${files}/${resource}/post" || \
+                          error "${resource} post execution failed"
+                    fi
+                fi
+            done
+        )
+    fi
+    return 0
+}
+
+function process_services() {
+    local module="${1}"
+    local services
+    local state
+
+    services="${moddir}/${module}/services"
+    if [[ -d $services ]]
+    then
+        log 'Processing services'
+        find "${services}" -mindepth 1 -maxdepth 1 -printf '%P\n' | (
+            while read -r svc
+            do
+                state=$(cat "${services}/${svc}")
+                service "${svc}" status > /dev/null 2>&1
+                curstate="$?"
+
+                case "${state}" in
+                running)
+                    if [[ $curstate -ne 0 ]]
+                    then
+                        runner service "${svc}" start || \
+                          error "Failed to start ${svc}"
+                    fi
+                    ;;
+                stopped)
+                    if [[ $curstate -eq 0 ]]
+                    then
+                        runner service "${svc}" stop || \
+                          error "Failed to stop ${svc}"
+                    fi
+                    ;;
+                *)
+                    error "Unknown state ${state} for service ${svc}"
+                    ;;
+                esac
+            done
+        )
+    fi
+    return 0
+}
+
+function process_module() {
+    local exitcode
+
+    ok "processing module ${1}"
+    if ! process_exec "${1}" pre
+    then
+        exitcode="$?"
+        error "failed to execute pre script for ${1}: ${exitcode}"
+        return "${exitcode}"
+    fi
+    if ! process_submodules "${1}" requires
+    then
+        exitcode="$?"
+        error "failed to execute dependencies for ${1}"
+        return "${exitcode}"
+    fi
+    if ! process_packages "${1}"
+    then
+        exitcode="$?"
+        error "failed to execute packages for ${1}"
+        return "${exitcode}"
+    fi
+    if ! process_files "${1}"
+    then
+        exitcode="$?"
+        error "failed to execute files for ${1}"
+        return "${exitcode}"
+    fi
+    if ! process_services "${1}"
+    then
+        exitcode="$?"
+        error "failed to execute services for ${1}"
+        return "${exitcode}"
+    fi
+    if ! process_submodules "${1}" next
+    then
+        exitcode="$?"
+        error "failed to execute next modules for ${1}"
+        return "${exitcode}"
+    fi
+    if ! process_exec "${1}" post
+    then
+        exitcode="$?"
+        error "failed to execute post script for ${1}"
+        return "${exitcode}"
+    fi
+
+    ok "Finished module ${1}"
+}
+
+function cli() {
+    local exitcode
+
+    ok 'Starting toycfg'
+
+    if [[ $# -ne 1 ]]
+    then
+        error 'must specify one module name'
+        return 1
+    fi
+
+    if [[ -z $TOYCFG_MODULES ]]
+    then
+        moddir=/etc/toycfg
+    else
+        moddir="${TOYCFG_MODULES}"
+    fi
+    log "toycfg module directory: ${moddir}"
+
+    local module="$1"
+    if [[ ! -d ${moddir}/${module} ]]
+    then
+        error "module '${module}' not found in ${moddir}"
+        return 1
+    fi
+
+    if ! process_module "${module}"
+    then
+        exitcode="$?"
+        error "Failed to process ${module}"
+        return "${exitcode}"
+    else
+        ok 'Finished toycfg'
+    fi
+}
+
+cli "$@"
+exit "$?"
+
+# EOF
